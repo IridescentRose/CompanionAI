@@ -13,3 +13,4 @@ torch
 pyttsx3
 openai
 requests
+langchain

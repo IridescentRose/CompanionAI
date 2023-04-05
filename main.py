@@ -16,6 +16,11 @@ import openai
 import json
 from multiprocessing.connection import Listener
 
+from langchain import OpenAI
+from langchain.chains import ConversationChain
+from langchain.chains.conversation.memory import ConversationSummaryMemory
+from langchain.prompts.prompt import PromptTemplate
+
 @click.command()
 @click.option("--model", default="base", help="Model to use", type=click.Choice(["tiny","base", "small","medium","large"]))
 @click.option("--energy", default=300, help="Energy level for mic to detect", type=int)
@@ -26,9 +31,10 @@ def main(model, energy, pause,dynamic_energy):
     global EL_key
     global EL_voice
     global OAI
-    global OAI_key
     global Use_EL
     global AI_Name
+    global LLM_Model
+    global Conversation
 
     try:
         with open("config.json", "r") as json_file:
@@ -44,15 +50,21 @@ def main(model, energy, pause,dynamic_energy):
     Use_EL = data["data"]["Use_EL"]
     AI_Name = data["data"]["AI_Name"]
 
-    class OAI:
-        key = data["keys"]["OAI_KEY"]
-        model = data["data"]["OAI_Model"]
-        prompt = data["data"]["OAI_Prompt"]
-        temperature = 0.9
-        max_tokens = 100
-        top_p = 1
-        frequency_penalty = 1
-        presence_penalty = 1
+    LLM_Model = OpenAI(
+        temperature = 0.9,
+        model_name = data["data"]["OAI_Model"],
+        max_tokens = 128,
+        top_p = 1,
+        frequency_penalty = 1,
+        presence_penalty = 1,
+        openai_api_key = data["keys"]["OAI_KEY"],
+    )
+
+    Conversation = ConversationChain(
+        llm=LLM_Model, 
+        memory=ConversationSummaryMemory(llm=LLM_Model), 
+        prompt=PromptTemplate(input_variables=["history", "input"], template=data["data"]["OAI_Prompt"])
+    )
 
     #there are no english models for large
     if model != "large":
@@ -77,6 +89,7 @@ def InputThread(result_queue):
 
         if(predicted_text == "And now please quit."):
             os._exit(0)
+
         LLM_Submit(predicted_text, result_queue)
 
 def MicrophoneThread(audio_queue, energy, pause, dynamic_energy):
@@ -159,7 +172,7 @@ def TTS(message):
 
 def LLM_Submit(message, result_queue):
     result_queue.put_nowait(f'<You>: {message}')
-    response = LLM(message)
+    response = Conversation.predict(input = message)
     result_queue.put_nowait(f'<{AI_Name}>: {response.lstrip()}')
     #TTS(response)
 
