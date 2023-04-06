@@ -1,131 +1,22 @@
-import io
-from pydub import AudioSegment
-import speech_recognition as sr
-import whisper
-import queue
-import tempfile
-import os
-import threading
-import click
-import torch
-import numpy as np
-import pyttsx3
-import requests
-from pydub.playback import play
 import openai
 import json
-from multiprocessing.connection import Listener
+import pyttsx3
+import os
+import threading
+import torch
+import whisper
+import speech_recognition
+import numpy as np
+import io
+import queue
 
 from langchain import OpenAI
 from langchain.chains import ConversationChain
 from langchain.chains.conversation.memory import ConversationSummaryMemory
 from langchain.prompts.prompt import PromptTemplate
 
-@click.command()
-@click.option("--model", default="base", help="Model to use", type=click.Choice(["tiny","base", "small","medium","large"]))
-@click.option("--energy", default=300, help="Energy level for mic to detect", type=int)
-@click.option("--dynamic_energy", default=False,is_flag=True, help="Flag to enable dynamic engergy", type=bool)
-@click.option("--pause", default=0.8, help="Pause time before entry ends", type=float)
-def main(model, energy, pause,dynamic_energy):
-    global EL
-    global EL_key
-    global EL_voice
-    global OAI
-    global Use_EL
-    global AI_Name
-    global LLM_Model
-    global Conversation
-
-    try:
-        with open("config.json", "r") as json_file:
-            data = json.load(json_file)
-    except:
-        print("Unable to open JSON file.")
-        exit()
-
-    class EL:
-        key = data["keys"]["EL_KEY"]
-        voice = data["data"]["EL_Voice"]
-
-    Use_EL = data["data"]["Use_EL"]
-    AI_Name = data["data"]["AI_Name"]
-
-    LLM_Model = OpenAI(
-        temperature = 0.9,
-        model_name = data["data"]["OAI_Model"],
-        max_tokens = 128,
-        top_p = 1,
-        frequency_penalty = 1,
-        presence_penalty = 1,
-        openai_api_key = data["keys"]["OAI_KEY"],
-    )
-
-    Conversation = ConversationChain(
-        llm=LLM_Model, 
-        memory=ConversationSummaryMemory(llm=LLM_Model), 
-        prompt=PromptTemplate(input_variables=["history", "input"], template=data["data"]["OAI_Prompt"])
-    )
-
-    #there are no english models for large
-    if model != "large":
-        model = model + ".en"
-
-    audio_model = whisper.load_model(model)
-    audio_queue = queue.Queue()
-    result_queue = queue.Queue()
-
-    threading.Thread(target=MicrophoneThread,
-                     args=(audio_queue, energy, pause, dynamic_energy)).start()
-    threading.Thread(target=ResponseLoop,
-                     args=(audio_queue, result_queue, audio_model)).start()
-    threading.Thread(target=InputThread, args=(result_queue,)).start()
-
-    while True:
-        print(result_queue.get())
-
-def InputThread(result_queue):
-    while True: 
-        predicted_text = input("").lstrip().rstrip()
-
-        if(predicted_text == "And now please quit."):
-            os._exit(0)
-
-        LLM_Submit(predicted_text, result_queue)
-
-def MicrophoneThread(audio_queue, energy, pause, dynamic_energy):
-    #load the speech recognizer and set the initial energy threshold and pause threshold
-    r = sr.Recognizer()
-    r.energy_threshold = energy
-    r.pause_threshold = pause
-    r.dynamic_energy_threshold = dynamic_energy
-
-    with sr.Microphone(sample_rate=16000) as source:
-        print("Say Something:")
-        i = 0
-        while True:
-            #get and save audio to wav file
-            audio = r.listen(source)
-            
-            torch_audio = torch.from_numpy(np.frombuffer(audio.get_raw_data(), np.int16).flatten().astype(np.float32) / 32768.0)
-            audio_data = torch_audio
-
-            audio_queue.put_nowait(audio_data)
-            i += 1
-
 def LLM(message):
-    openai.api_key = OAI.key
-    response = openai.Completion.create(
-      model= OAI.model,
-      prompt= OAI.prompt + "\n\n#########\n" + message + "\n#########\n",
-      temperature = OAI.temperature,
-      max_tokens = OAI.max_tokens,
-      top_p = OAI.top_p,
-      frequency_penalty = OAI.frequency_penalty,
-      presence_penalty = OAI.presence_penalty
-    )
-
-    json_object = json.loads(str(response))
-    return(json_object['choices'][0]['text'])
+    return Conversation.predict(input=message)
 
 def Setup_TTS():
     global engine
@@ -134,60 +25,90 @@ def Setup_TTS():
     engine.setProperty('volume', 1)
     voice = engine.getProperty('voices')
     engine.setProperty('voice', voice[1].id)
-    print(engine)
-    print(voice)
 
-def REG_TTS(message):
-    if engine._inLoop:
-        engine.endLoop()
-    
+def TTS(message):
     engine.say(message)
     engine.runAndWait()
 
+def MicrophoneThread(audio_queue):
+    r = speech_recognition.Recognizer()
+    r.energy_threshold = 300
+    r.pause_threshold = 0.8
+    r.dynamic_energy_threshold = False
 
-def EL_TTS(message):
-    url = f'https://api.elevenlabs.io/v1/text-to-speech/{EL.voice}'
-    headers = {
-        'accept': 'audio/mpeg',
-        'xi-api-key': EL.key,
-        'Content-Type': 'application/json'
-    }
-    data = {
-        'text': message,
-        'voice_settings': {
-            'stability': 0.75,
-            'similarity_boost': 0.75
-        }
-    }
+    with speech_recognition.Microphone(sample_rate=16000) as source:
+        while True:
+            audio = r.listen(source)
 
-    response = requests.post(url, headers=headers, json=data, stream=True)
-    audio_content = AudioSegment.from_file(io.BytesIO(response.content), format="mp3")
-    play(audio_content)
+            torch_audio = torch.from_numpy(np.frombuffer(audio.get_raw_data(), np.int16).flatten().astype(np.float32) / 32768.0)
+            audio_data = torch_audio
+            audio_queue.put_nowait(audio_data)
 
-def TTS(message):
-    if(Use_EL):
-        EL_TTS(message)
-    else:
-        REG_TTS(message)
+def LLM_Response(message):
+    if(message.lower() == "And now exit.".lower()):
+        os._exit(0)
+        
+    ai_response = LLM(message).lstrip()
 
-def LLM_Submit(message, result_queue):
-    result_queue.put_nowait(f'<You>: {message}')
-    response = Conversation.predict(input = message)
-    result_queue.put_nowait(f'<{AI_Name}>: {response.lstrip()}')
-    #TTS(response)
+    print(f"{AI_Name}: {ai_response}")
+    TTS(ai_response)
 
-def ResponseLoop(audio_queue, result_queue, audio_model):
+def InputThread(text_queue):
+    while True:
+        text_input = input("").strip()
+        text_queue.put_nowait(text_input)
+
+def main():
+    global LLM_Model
+    global Conversation
+    global AI_Name
+
+    try:
+        with open("config.json", "r") as json_file:
+            data = json.load(json_file)
+    except:
+        print("Unable to open config")
+        exit()
+    
+
     Setup_TTS()
 
+    AI_Name = data["AI_Name"]
+
+    LLM_Model = OpenAI(
+        temperature = 0.9,
+        max_tokens = 256,
+        top_p = 1,
+        frequency_penalty = 1,
+        presence_penalty = 1,
+        openai_api_key = data["OAI_Key"],
+        model_name = "text-davinci-003"
+    )
+
+    Conversation = ConversationChain(
+        llm = LLM_Model,
+        prompt=PromptTemplate(input_variables=["history", "input"], template= data["prompt"]),
+        memory=ConversationSummaryMemory(llm = LLM_Model)
+    )
+
+    audio_model = whisper.load_model("base.en")
+    audio_queue = queue.Queue()
+    text_queue = queue.Queue()
+
+    threading.Thread(target=MicrophoneThread, args=(audio_queue,)).start()
+    threading.Thread(target=InputThread, args=(text_queue,)).start()
+
     while True:
-        audio_data = audio_queue.get()
-        result = audio_model.transcribe(audio_data,language='english')
-
-        predicted_text = result["text"].lstrip()
-
-        if(predicted_text == "And now please quit."):
-            os._exit(0)
-        
-        LLM_Submit(predicted_text, result_queue)
+        if not text_queue.empty():
+            text_data = text_queue.get()
+            LLM_Response(message=text_data)
+        elif not audio_queue.empty():
+            audio_data = audio_queue.get()
+            result = audio_model.transcribe(audio_data,language="english")
+            predicted_text = result["text"].lstrip()
+            print(f"You: {predicted_text}")
+            LLM_Response(message=predicted_text);
+        else:
+            pass
 
 main()
